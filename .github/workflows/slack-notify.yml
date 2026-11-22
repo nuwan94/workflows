@@ -1,0 +1,72 @@
+# Reusable workflow: post a deployment result to Slack through an incoming webhook.
+# Call it from any repository after your build and deploy jobs. See README.md.
+name: Slack deployment notification
+
+on:
+  workflow_call:
+    inputs:
+      result:
+        description: 'Overall result: success, failure or cancelled'
+        type: string
+        required: true
+      project:
+        description: 'Project name shown in the message (default: the repository name)'
+        type: string
+        required: false
+        default: ''
+      environment:
+        description: 'Where it was deployed, for example production or GitHub Pages'
+        type: string
+        required: false
+        default: 'production'
+      url:
+        description: 'Link to the deployed site or app'
+        type: string
+        required: false
+        default: ''
+    secrets:
+      SLACK_WEBHOOK_URL:
+        description: 'Slack incoming webhook URL'
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Post to Slack
+        env:
+          WEBHOOK: ${{ secrets.SLACK_WEBHOOK_URL }}
+          RESULT: ${{ inputs.result }}
+          PROJECT: ${{ inputs.project || github.event.repository.name }}
+          TARGET: ${{ inputs.environment }}
+          URL: ${{ inputs.url }}
+          ACTOR: ${{ github.actor }}
+          BRANCH: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
+        run: |
+          if [ -z "$WEBHOOK" ]; then
+            echo "SLACK_WEBHOOK_URL is not set, skipping the Slack message."
+            exit 0
+          fi
+          case "$RESULT" in
+            success)   ICON=":white_check_mark:"; WORD="deployed";         COLOR="#2eb67d" ;;
+            cancelled) ICON=":no_entry_sign:";    WORD="deployment cancelled"; COLOR="#ecb22e" ;;
+            *)         ICON=":x:";                WORD="deployment failed"; COLOR="#e01e5a" ;;
+          esac
+          SHORT_SHA="${SHA:0:7}"
+          FIRST_LINE="$(printf '%s' "$COMMIT_MESSAGE" | head -n 1)"
+          TITLE="$ICON *$PROJECT* $WORD to $TARGET"
+          DETAILS="<https://github.com/$REPO/commit/$SHA|$SHORT_SHA> on \`$BRANCH\` by $ACTOR"
+          [ -n "$FIRST_LINE" ] && DETAILS="$DETAILS: $FIRST_LINE"
+          LINKS="<$RUN_URL|View run>"
+          [ -n "$URL" ] && LINKS="<$URL|Open site> | $LINKS"
+          PAYLOAD="$(jq -n --arg title "$TITLE" --arg details "$DETAILS" --arg links "$LINKS" --arg color "$COLOR" \
+            '{attachments: [{color: $color, mrkdwn_in: ["text"], text: ($title + "\n" + $details + "\n" + $links)}]}')"
+          curl --fail --silent --show-error --max-time 20 \
+            -X POST -H 'Content-Type: application/json' --data "$PAYLOAD" "$WEBHOOK"
